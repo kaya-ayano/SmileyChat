@@ -16,7 +16,7 @@ import {
 
 import { PluginCard } from "./plugins/plugin-card";
 import { ProfileBar } from "./plugins/profile-bar";
-import { CATEGORY_ICONS } from "./plugins/plugin-settings-helpers";
+import { CATEGORY_ICONS, pluginIdFromScopedId } from "./plugins/plugin-settings-helpers";
 import { StorePluginCard } from "./plugins/store-plugin-card";
 import { usePluginSettings } from "./plugins/use-plugin-settings";
 
@@ -44,21 +44,19 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
         installManualPlugin,
         installStorePlugin,
         isCustom,
-        loadedState,
+        isBusy,
+        loadedPlugins,
         localPluginIds,
         manualArtifactAllowed,
         manualArtifactUrl,
         manualInstallBusy,
         openPluginId,
+        pluginRegistryQuery,
         plugins,
         refreshAll,
         refreshRegistry,
         registryCategoryCounts,
-        registryFailed,
-        registryLoaded,
-        registryPlugins,
         registryStatusById,
-        requestState,
         searchTerm,
         setActiveView,
         setCategoryFilter,
@@ -66,7 +64,8 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
         setManualArtifactUrl,
         setOpenPluginId,
         setSearchTerm,
-        settingsPanelsForPlugin,
+        pluginSettingsPanels,
+        statusKind,
         statusMessage,
         togglePlugin,
         updatingPluginId,
@@ -99,11 +98,7 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                         the engine for the experience you want.
                     </p>
                 </div>
-                <button
-                    type="button"
-                    disabled={requestState === "loading"}
-                    onClick={() => void refreshAll()}
-                >
+                <button type="button" disabled={isBusy} onClick={() => void refreshAll()}>
                     <RefreshCw size={16} />
                     Refresh
                 </button>
@@ -122,7 +117,7 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                         className={activeView === value ? "active" : ""}
                         onClick={() => {
                             setActiveView(value);
-                            if (value === "store" && !registryLoaded) {
+                            if (value === "store" && !pluginRegistryQuery.isFetched) {
                                 void refreshRegistry();
                             }
                         }}
@@ -137,7 +132,7 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                     profiles={allProfiles}
                     activeProfile={activeProfile}
                     isCustom={isCustom}
-                    isBusy={requestState === "loading"}
+                    isBusy={isBusy}
                     onApply={applyProfile}
                     onCreateNew={() => void createNewProfile()}
                     onDuplicateActive={() => void duplicateActiveProfile()}
@@ -215,7 +210,9 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                     <Layers size={14} />
                     All
                     <span className="category-tab-count">
-                        {activeView === "store" ? registryPlugins.length : plugins.length}
+                        {activeView === "store"
+                            ? (pluginRegistryQuery.data?.plugins.length ?? 0)
+                            : plugins.length}
                     </span>
                 </button>
                 {PLUGIN_CATEGORIES.map((category) => {
@@ -266,11 +263,16 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                                         plugin,
                                         registryStatusById,
                                     )}
-                                    loaded={loadedState(plugin)}
+                                    loaded={loadedPlugins.find(
+                                        (item) => item.manifest.id === plugin.id,
+                                    )}
                                     showConfiguration={openPluginId === plugin.id}
-                                    settingsPanels={settingsPanelsForPlugin(plugin.id)}
+                                    settingsPanels={pluginSettingsPanels.filter(
+                                        (panel) =>
+                                            pluginIdFromScopedId(panel.id) === plugin.id,
+                                    )}
                                     pluginSnapshot={pluginSnapshot}
-                                    requestState={requestState}
+                                    isBusy={isBusy}
                                     isUpdating={updatingPluginId === plugin.id}
                                     onToggle={() => void togglePlugin(plugin)}
                                     onUpdate={() => void updateManagedPlugin(plugin)}
@@ -341,7 +343,7 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                             <button
                                 type="submit"
                                 className="plugin-install-button"
-                                disabled={manualInstallBusy || requestState === "loading"}
+                                disabled={manualInstallBusy || isBusy}
                             >
                                 <Download size={15} aria-hidden="true" />
                                 {manualInstallBusy ? "Installing..." : "Install Artifact"}
@@ -357,36 +359,34 @@ export function PluginsSettings({ pluginSnapshot }: PluginsSettingsProps) {
                             installedPlugin={plugins.find(
                                 (installedPlugin) => installedPlugin.id === plugin.id,
                             )}
-                            isBusy={
-                                requestState === "loading" &&
-                                installingPluginId === plugin.id
-                            }
+                            isBusy={installingPluginId === plugin.id}
                             isUpdating={updatingPluginId === plugin.id}
-                            isBlocked={requestState === "loading"}
+                            isBlocked={isBusy}
                             onInstall={() => void installStorePlugin(plugin)}
                             onUpdate={() => void updateStorePlugin(plugin)}
                         />
                     ))}
 
-                    {registryFailed && (
+                    {pluginRegistryQuery.isError && (
                         <div className="empty-plugin-state">
                             <XCircle size={20} />
                             <p>Extension registry is unavailable.</p>
                         </div>
                     )}
 
-                    {!registryFailed && filteredRegistryPlugins.length === 0 && (
-                        <div className="empty-plugin-state">
-                            <Search size={20} />
-                            <p>No extensions match these filters.</p>
-                        </div>
-                    )}
+                    {!pluginRegistryQuery.isError &&
+                        filteredRegistryPlugins.length === 0 && (
+                            <div className="empty-plugin-state">
+                                <Search size={20} />
+                                <p>No extensions match these filters.</p>
+                            </div>
+                        )}
                 </div>
             )}
 
             {statusMessage && (
                 <p
-                    className={`connection-status ${requestState}`}
+                    className={`connection-status ${statusKind}`}
                     role="status"
                     aria-live="polite"
                 >

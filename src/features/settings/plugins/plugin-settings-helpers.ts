@@ -12,7 +12,6 @@ import type { FunctionComponent } from "preact";
 import { BUILT_IN_PROFILES, type PluginProfile } from "#frontend/lib/plugins/profiles";
 import type { PluginCategory } from "#frontend/lib/plugins/types";
 
-export type RequestState = "idle" | "loading" | "success" | "error";
 export type InstalledFilter = "all" | "installed" | "not-installed";
 export type PluginsView = "local" | "store";
 

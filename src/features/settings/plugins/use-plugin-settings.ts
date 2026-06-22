@@ -1,19 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/preact-query";
+import { useEffect, useMemo, useState } from "preact/hooks";
 
 import { mergeCoreAndUserPluginManifests } from "#frontend/core-extensions";
-import {
-    deletePluginProfile,
-    installManualArtifact,
-    installPlugin,
-    loadPluginManifests,
-    loadPluginProfiles,
-    loadPluginRegistry,
-    savePluginEnabled,
-    savePluginProfilesState,
-    updatePlugin,
-    type PluginRegistryEntry,
-    type PluginProfilesPayload,
-} from "#frontend/lib/api/client";
+import { type PluginRegistryEntry } from "#frontend/lib/api/client";
+import { mutationStore } from "#frontend/lib/api/mutation-options";
+import { queryKeys, queryStore } from "#frontend/lib/api/query-options";
 import { messageFromError } from "#frontend/lib/common/errors";
 import {
     applyProfileToPlugins,
@@ -44,40 +35,64 @@ import {
 import {
     type InstalledFilter,
     nextProfileName,
-    pluginIdFromScopedId,
     type PluginsView,
-    type RequestState,
     uniqueProfileId,
 } from "./plugin-settings-helpers";
 
 export function usePluginSettings() {
-    const [plugins, setPlugins] = useState<PluginManifest[]>([]);
-    const [profilesPayload, setProfilesPayload] = useState<PluginProfilesPayload | null>(
-        null,
+    const queryClient = useQueryClient();
+    const pluginManifestsQuery = useQuery(queryStore.pluginManifests);
+    const pluginProfilesQuery = useQuery(queryStore.pluginProfiles);
+    const pluginRegistryQuery = useQuery(queryStore.pluginRegistry);
+    const deletePluginProfileMutation = useMutation(mutationStore.deletePluginProfile);
+    const installManualArtifactMutation = useMutation(
+        mutationStore.installManualArtifact,
     );
-    const [requestState, setRequestState] = useState<RequestState>("idle");
+    const installPluginMutation = useMutation(mutationStore.installPlugin);
+    const savePluginEnabledMutation = useMutation(mutationStore.savePluginEnabled);
+    const savePluginProfilesStateMutation = useMutation(
+        mutationStore.savePluginProfilesState,
+    );
+    const updatePluginMutation = useMutation(mutationStore.updatePlugin);
     const [statusMessage, setStatusMessage] = useState("");
+    const [statusKind, setStatusKind] = useState<"success" | "error">("success");
     const [openPluginId, setOpenPluginId] = useState("");
     const [searchTerm, setSearchTerm] = useState("");
     const [installedFilter, setInstalledFilter] = useState<InstalledFilter>("all");
     const [categoryFilter, setCategoryFilter] = useState<PluginCategory | "all">("all");
     const [activeView, setActiveView] = useState<PluginsView>("local");
-    const [registryPlugins, setRegistryPlugins] = useState<PluginRegistryEntry[]>([]);
-    const [registryLoaded, setRegistryLoaded] = useState(false);
-    const [registryFailed, setRegistryFailed] = useState(false);
-    const [manualArtifactAllowed, setManualArtifactAllowed] = useState(false);
     const [manualArtifactUrl, setManualArtifactUrl] = useState("");
     const [installingPluginId, setInstallingPluginId] = useState("");
     const [updatingPluginId, setUpdatingPluginId] = useState("");
     const [manualInstallBusy, setManualInstallBusy] = useState(false);
+
     const [, setRegistryRevision] = useState(0);
-    const operationInFlightRef = useRef(false);
     const loadedPlugins = getLoadedPlugins();
     const pluginSettingsPanels = getPluginSettingsPanels();
 
-    useEffect(() => {
-        void refreshAll();
-    }, []);
+    const plugins = useMemo(
+        () => mergeCoreAndUserPluginManifests(pluginManifestsQuery.data?.plugins ?? []),
+        [pluginManifestsQuery.data?.plugins],
+    );
+
+    const profilesPayload = pluginProfilesQuery.data ?? null;
+    const manualArtifactAllowed =
+        !pluginRegistryQuery.isError &&
+        pluginRegistryQuery.data?.allowManualArtifactInstall === true;
+    const isMutationPending =
+        deletePluginProfileMutation.isPending ||
+        installManualArtifactMutation.isPending ||
+        installPluginMutation.isPending ||
+        savePluginEnabledMutation.isPending ||
+        savePluginProfilesStateMutation.isPending ||
+        updatePluginMutation.isPending;
+
+    const isBusy =
+        pluginManifestsQuery.isFetching ||
+        pluginProfilesQuery.isFetching ||
+        pluginRegistryQuery.isFetching ||
+        isMutationPending ||
+        manualInstallBusy;
 
     useEffect(
         () =>
@@ -107,14 +122,6 @@ export function usePluginSettings() {
     const isCustom = profilesPayload
         ? isStateCustom(currentEnabledMap, profilesPayload.lastApplied)
         : false;
-    const setProfilesStateFromSave = (state: PluginProfilesState) => {
-        setProfilesPayload({
-            activeProfileId: state.activeProfileId,
-            lastApplied: state.lastApplied,
-            builtinProfiles: profilesPayload?.builtinProfiles ?? BUILT_IN_PROFILES,
-            userProfiles: state.userProfiles,
-        });
-    };
 
     const filteredPlugins = useMemo(() => {
         const search = searchTerm.trim().toLowerCase();
@@ -182,18 +189,18 @@ export function usePluginSettings() {
 
     const registryStatusById = useMemo(() => {
         const map = new Map<string, PluginRegistryEntry["status"]>();
-        if (registryFailed) {
+        if (pluginRegistryQuery.isError) {
             return map;
         }
-        for (const plugin of registryPlugins) {
+        for (const plugin of pluginRegistryQuery.data?.plugins ?? []) {
             map.set(plugin.id, plugin.status);
         }
         return map;
-    }, [registryFailed, registryPlugins]);
+    }, [pluginRegistryQuery.data?.plugins, pluginRegistryQuery.isError]);
 
     const filteredRegistryPlugins = useMemo(() => {
         const search = searchTerm.trim().toLowerCase();
-        return registryPlugins.filter((plugin) => {
+        return (pluginRegistryQuery.data?.plugins ?? []).filter((plugin) => {
             const installed = localPluginIds.has(plugin.id);
 
             if (categoryFilter !== "all" && plugin.category !== categoryFilter) {
@@ -226,80 +233,76 @@ export function usePluginSettings() {
 
             return true;
         });
-    }, [categoryFilter, installedFilter, localPluginIds, registryPlugins, searchTerm]);
+    }, [
+        categoryFilter,
+        installedFilter,
+        localPluginIds,
+        pluginRegistryQuery.data?.plugins,
+        searchTerm,
+    ]);
 
     const registryCategoryCounts = useMemo(() => {
         const counts = new Map<PluginCategory, number>();
-        for (const plugin of registryPlugins) {
+        for (const plugin of pluginRegistryQuery.data?.plugins ?? []) {
             counts.set(plugin.category, (counts.get(plugin.category) ?? 0) + 1);
         }
         return counts;
-    }, [registryPlugins]);
+    }, [pluginRegistryQuery.data?.plugins]);
 
     async function refreshAll() {
-        if (operationInFlightRef.current) {
-            return;
-        }
-
-        operationInFlightRef.current = true;
-        setRequestState("loading");
-
         try {
             const [manifestResponse, profilesResponse] = await Promise.all([
-                loadPluginManifests(),
-                loadPluginProfiles(),
+                pluginManifestsQuery.refetch(),
+                pluginProfilesQuery.refetch(),
             ]);
-            setPlugins(mergeCoreAndUserPluginManifests(manifestResponse.plugins));
-            setProfilesPayload(profilesResponse);
+
+            if (manifestResponse.error) {
+                throw manifestResponse.error;
+            }
+            if (profilesResponse.error) {
+                throw profilesResponse.error;
+            }
+
             void refreshRegistry(false);
             setStatusMessage("");
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not load plugins."));
-            setRequestState("error");
-        } finally {
-            operationInFlightRef.current = false;
+            setStatusKind("error");
         }
     }
 
     async function refreshRegistry(showStatus = true) {
         try {
-            const registry = await loadPluginRegistry();
-            setRegistryPlugins(registry.plugins);
-            setManualArtifactAllowed(registry.allowManualArtifactInstall === true);
-            setRegistryLoaded(true);
-            setRegistryFailed(false);
+            const registryResponse = await pluginRegistryQuery.refetch();
+            if (registryResponse.error) {
+                throw registryResponse.error;
+            }
         } catch (error) {
-            setRegistryPlugins([]);
-            setManualArtifactAllowed(false);
-            setRegistryLoaded(true);
-            setRegistryFailed(true);
             if (showStatus) {
                 setStatusMessage(
                     messageFromError(error, "Could not load extension registry."),
                 );
-                setRequestState("error");
+                setStatusKind("error");
             }
         }
     }
 
     async function togglePlugin(plugin: PluginManifest) {
-        if (operationInFlightRef.current) {
-            return;
-        }
+        if (isBusy) return;
 
-        operationInFlightRef.current = true;
         const nextEnabled = plugin.enabled === false;
         const enablingUnverified =
             nextEnabled &&
             plugin.source !== "core" &&
             plugin.install?.source !== "registry" &&
             !registryStatusById.has(plugin.id);
-        setRequestState("loading");
 
         try {
-            const response = await savePluginEnabled(plugin.id, nextEnabled);
-            setPlugins(mergeCoreAndUserPluginManifests(response.plugins ?? []));
+            const response = await savePluginEnabledMutation.mutateAsync({
+                pluginId: plugin.id,
+                enabled: nextEnabled,
+            });
             setPluginEnabledState(plugin.id, nextEnabled);
 
             if (plugin.source === "core") {
@@ -318,62 +321,56 @@ export function usePluginSettings() {
             } else {
                 deactivatePlugin(plugin.id);
             }
+            await queryClient.invalidateQueries({
+                queryKey: queryKeys.plugins.manifests,
+            });
 
             setStatusMessage(
                 `${plugin.name} ${nextEnabled ? "enabled" : "disabled"}.${
                     enablingUnverified
                         ? " This plugin is unverified; keep it enabled only if you completely trust the author."
-                        : plugin.source === "core" || nextEnabled || loadedState(plugin)
+                        : plugin.source === "core" ||
+                            nextEnabled ||
+                            loadedPlugins.find((item) => item.manifest.id === plugin.id)
                           ? ""
                           : " Restart SmileyChat to load this plugin into the current session."
                 }`,
             );
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not update plugin."));
-            setRequestState("error");
-        } finally {
-            operationInFlightRef.current = false;
+            setStatusKind("error");
         }
     }
 
     async function installStorePlugin(plugin: PluginRegistryEntry) {
-        if (operationInFlightRef.current) {
+        if (isBusy) {
             return;
         }
 
-        operationInFlightRef.current = true;
-        setRequestState("loading");
         setInstallingPluginId(plugin.id);
 
         try {
-            await installAndApplyEnabled(plugin.id, true, () => installPlugin(plugin.id));
+            await installAndApplyEnabled(plugin.id, true, () =>
+                installPluginMutation.mutateAsync(plugin.id),
+            );
             setStatusMessage(`${plugin.name} installed and enabled.`);
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not install extension."));
-            setRequestState("error");
+            setStatusKind("error");
         } finally {
             setInstallingPluginId("");
-            operationInFlightRef.current = false;
         }
     }
 
     async function updateStorePlugin(plugin: PluginRegistryEntry) {
-        if (operationInFlightRef.current) {
-            return;
-        }
+        if (isBusy) return;
 
         const installedPlugin = plugins.find((item) => item.id === plugin.id);
+        if (!installedPlugin) return;
 
-        if (!installedPlugin) {
-            return;
-        }
-
-        operationInFlightRef.current = true;
-        setRequestState("loading");
         setUpdatingPluginId(plugin.id);
-
         try {
             const shouldRemainEnabled = installedPlugin.enabled !== false;
             const updatedPlugin = await installAndApplyEnabled(
@@ -383,67 +380,57 @@ export function usePluginSettings() {
                 // The managed update endpoint preserves the installed source, which is
                 // correct for Local Plugins but wrong for replacing a manual artifact
                 // with the verified Store entry of the same ID.
-                () => installPlugin(plugin.id),
+                () => installPluginMutation.mutateAsync(plugin.id),
             );
             setStatusMessage(
                 `${updatedPlugin.name} updated from the Extension Store${
                     shouldRemainEnabled ? " and enabled" : ""
                 }.`,
             );
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not update extension."));
-            setRequestState("error");
+            setStatusKind("error");
         } finally {
             setUpdatingPluginId("");
-            operationInFlightRef.current = false;
         }
     }
 
     async function installManualPlugin() {
-        if (operationInFlightRef.current) {
-            return;
-        }
+        if (isBusy) return;
 
         const artifactUrl = manualArtifactUrl.trim();
-
         if (!artifactUrl) {
             setStatusMessage("Enter an HTTPS ZIP artifact URL.");
-            setRequestState("error");
+            setStatusKind("error");
             return;
         }
 
-        operationInFlightRef.current = true;
-        setRequestState("loading");
         setManualInstallBusy(true);
-
         try {
             const installedPlugin = await installAndApplyEnabled("", true, () =>
-                installManualArtifact(artifactUrl),
+                installManualArtifactMutation.mutateAsync(artifactUrl),
             );
             setManualArtifactUrl("");
             setStatusMessage(
                 `${installedPlugin.name} installed from a manual artifact and enabled. Keep it enabled only if you trust the source.`,
             );
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(
                 messageFromError(error, "Could not install manual artifact."),
             );
-            setRequestState("error");
+            setStatusKind("error");
         } finally {
             setManualInstallBusy(false);
-            operationInFlightRef.current = false;
         }
     }
 
     async function updateManagedPlugin(plugin: PluginManifest) {
-        if (!plugin.install || operationInFlightRef.current) {
+        if (!plugin.install || isBusy) {
             return;
         }
 
-        operationInFlightRef.current = true;
-        setRequestState("loading");
         setUpdatingPluginId(plugin.id);
 
         try {
@@ -451,20 +438,19 @@ export function usePluginSettings() {
             const updatedPlugin = await installAndApplyEnabled(
                 plugin.id,
                 shouldRemainEnabled,
-                () => updatePlugin(plugin.id),
+                () => updatePluginMutation.mutateAsync(plugin.id),
             );
             setStatusMessage(
                 `${updatedPlugin.name} updated${
                     shouldRemainEnabled ? " and enabled" : ""
                 }.`,
             );
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not update plugin."));
-            setRequestState("error");
+            setStatusKind("error");
         } finally {
             setUpdatingPluginId("");
-            operationInFlightRef.current = false;
         }
     }
 
@@ -483,7 +469,10 @@ export function usePluginSettings() {
         let nextPlugins = installResponse.plugins;
 
         if ((installedPlugin.enabled !== false) !== enabled) {
-            const enableResponse = await savePluginEnabled(pluginId, enabled);
+            const enableResponse = await savePluginEnabledMutation.mutateAsync({
+                pluginId,
+                enabled,
+            });
             installedPlugin = enableResponse.plugins?.find(
                 (item) => item.id === pluginId,
             ) ??
@@ -491,7 +480,6 @@ export function usePluginSettings() {
             nextPlugins = enableResponse.plugins ?? nextPlugins;
         }
 
-        setPlugins(mergeCoreAndUserPluginManifests(nextPlugins));
         setPluginEnabledState(pluginId, enabled);
 
         if (enabled) {
@@ -499,29 +487,21 @@ export function usePluginSettings() {
         } else {
             deactivatePlugin(pluginId);
         }
+        await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.manifests });
 
         return { ...installedPlugin, enabled };
     }
 
-    function loadedState(plugin: PluginManifest) {
-        return loadedPlugins.find((item) => item.manifest.id === plugin.id);
-    }
-
-    function settingsPanelsForPlugin(pluginId: string) {
-        return pluginSettingsPanels.filter(
-            (panel) => pluginIdFromScopedId(panel.id) === pluginId,
-        );
-    }
-
     async function applyProfile(profile: PluginProfile) {
         if (!profilesPayload) return;
-        setRequestState("loading");
 
         try {
             const { appliedEnabled, enabledChanges, configChanges } =
                 await applyProfileToPlugins(profile, plugins);
-            const refreshed = await loadPluginManifests();
-            setPlugins(mergeCoreAndUserPluginManifests(refreshed.plugins));
+            const refreshed = await pluginManifestsQuery.refetch();
+            if (refreshed.error) {
+                throw refreshed.error;
+            }
 
             const nextState: PluginProfilesState = {
                 version: 1,
@@ -529,18 +509,19 @@ export function usePluginSettings() {
                 lastApplied: appliedEnabled,
                 userProfiles: profilesPayload.userProfiles,
             };
-            const saved = await savePluginProfilesState(nextState);
-            setProfilesStateFromSave(saved.state);
+
+            await savePluginProfilesStateMutation.mutateAsync(nextState);
+            await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.profiles });
 
             const summary =
                 enabledChanges.length === 0 && configChanges.length === 0
                     ? `${profile.name} applied. No plugins needed to change.`
                     : `${profile.name} applied. ${enabledChanges.length} toggled, ${configChanges.length} config${configChanges.length === 1 ? "" : "s"} restored.`;
             setStatusMessage(summary);
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not apply profile."));
-            setRequestState("error");
+            setStatusKind("error");
         }
     }
 
@@ -549,7 +530,6 @@ export function usePluginSettings() {
         const name = nextProfileName("Plugin profile", allProfiles);
         const id = uniqueProfileId(name, allProfiles);
 
-        setRequestState("loading");
         try {
             const pluginConfig = await snapshotAllPluginConfigs(plugins);
             const newProfile: PluginProfile = {
@@ -573,13 +553,14 @@ export function usePluginSettings() {
                     newProfile,
                 ],
             };
-            const saved = await savePluginProfilesState(nextState);
-            setProfilesStateFromSave(saved.state);
+            await savePluginProfilesStateMutation.mutateAsync(nextState);
+            await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.profiles });
+
             setStatusMessage(`Created "${name}" from the current plugin state.`);
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not create profile."));
-            setRequestState("error");
+            setStatusKind("error");
         }
     }
 
@@ -588,7 +569,6 @@ export function usePluginSettings() {
         const name = nextProfileName(`${activeProfile.name} Copy`, allProfiles);
         const id = uniqueProfileId(name, allProfiles);
 
-        setRequestState("loading");
         try {
             const duplicated: PluginProfile = {
                 ...activeProfile,
@@ -607,27 +587,29 @@ export function usePluginSettings() {
                 lastApplied: { ...profilesPayload.lastApplied },
                 userProfiles: [...profilesPayload.userProfiles, duplicated],
             };
-            const saved = await savePluginProfilesState(nextState);
-            setProfilesStateFromSave(saved.state);
+            await savePluginProfilesStateMutation.mutateAsync(nextState);
+            await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.profiles });
+
             setStatusMessage(`Duplicated "${activeProfile.name}" as "${name}".`);
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not duplicate profile."));
-            setRequestState("error");
+            setStatusKind("error");
         }
     }
 
     async function deleteActiveProfile() {
         if (!profilesPayload || !activeProfile || activeProfile.builtin) return;
-        setRequestState("loading");
+
         try {
-            const response = await deletePluginProfile(activeProfile.id);
-            setProfilesStateFromSave(response.state);
+            await deletePluginProfileMutation.mutateAsync(activeProfile.id);
+            await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.profiles });
+
             setStatusMessage(`Deleted "${activeProfile.name}". Active profile reset.`);
-            setRequestState("success");
+            setStatusKind("success");
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not delete profile."));
-            setRequestState("error");
+            setStatusKind("error");
         }
     }
 
@@ -644,7 +626,7 @@ export function usePluginSettings() {
 
         if (!name) {
             setStatusMessage("Profile name cannot be empty.");
-            setRequestState("error");
+            setStatusKind("error");
             return false;
         }
 
@@ -656,11 +638,9 @@ export function usePluginSettings() {
 
         if (nameTaken) {
             setStatusMessage(`A profile named "${name}" already exists.`);
-            setRequestState("error");
+            setStatusKind("error");
             return false;
         }
-
-        setRequestState("loading");
 
         try {
             const nextState: PluginProfilesState = {
@@ -677,15 +657,15 @@ export function usePluginSettings() {
                         : profile,
                 ),
             };
-            const saved = await savePluginProfilesState(nextState);
+            await savePluginProfilesStateMutation.mutateAsync(nextState);
+            await queryClient.invalidateQueries({ queryKey: queryKeys.plugins.profiles });
 
-            setProfilesStateFromSave(saved.state);
             setStatusMessage(`Updated "${name}".`);
-            setRequestState("success");
+            setStatusKind("success");
             return true;
         } catch (error) {
             setStatusMessage(messageFromError(error, "Could not update profile."));
-            setRequestState("error");
+            setStatusKind("error");
             return false;
         }
     }
@@ -709,21 +689,19 @@ export function usePluginSettings() {
         updateStorePlugin,
         installManualPlugin,
         isCustom,
-        loadedState,
+        isBusy,
+        loadedPlugins,
         localPluginIds,
         manualArtifactAllowed,
         manualArtifactUrl,
         manualInstallBusy,
         openPluginId,
+        pluginRegistryQuery,
         plugins,
         refreshAll,
         refreshRegistry,
         registryCategoryCounts,
-        registryFailed,
-        registryLoaded,
-        registryPlugins,
         registryStatusById,
-        requestState,
         searchTerm,
         setActiveView,
         setCategoryFilter,
@@ -731,7 +709,8 @@ export function usePluginSettings() {
         setManualArtifactUrl,
         setOpenPluginId,
         setSearchTerm,
-        settingsPanelsForPlugin,
+        pluginSettingsPanels,
+        statusKind,
         statusMessage,
         togglePlugin,
         updatingPluginId,

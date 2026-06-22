@@ -21,7 +21,7 @@ import {
     type PluginManifest,
 } from "#frontend/lib/plugins/types";
 
-import { CATEGORY_ICONS, type RequestState } from "./plugin-settings-helpers";
+import { CATEGORY_ICONS } from "./plugin-settings-helpers";
 import { PluginTrustBadge } from "./plugin-trust-badge";
 import { PluginRenderSurface } from "../../plugins/plugin-error-boundary";
 
@@ -32,7 +32,7 @@ export type PluginCardProps = {
     showConfiguration: boolean;
     settingsPanels: ReturnType<typeof getPluginSettingsPanels>;
     pluginSnapshot: PluginAppSnapshot;
-    requestState: RequestState;
+    isBusy: boolean;
     isUpdating: boolean;
     onToggle: () => void;
     onUpdate: () => void;
@@ -46,7 +46,7 @@ export function PluginCard({
     showConfiguration,
     settingsPanels,
     pluginSnapshot,
-    requestState,
+    isBusy,
     isUpdating,
     onToggle,
     onUpdate,
@@ -97,7 +97,7 @@ export function PluginCard({
                     <input
                         type="checkbox"
                         checked={enabled}
-                        disabled={requestState === "loading"}
+                        disabled={isBusy}
                         onChange={onToggle}
                     />
                     <span className="plugin-toggle-track" aria-hidden="true">
@@ -165,7 +165,7 @@ export function PluginCard({
                 {canUpdate && (
                     <button
                         type="button"
-                        disabled={requestState === "loading"}
+                        disabled={isBusy}
                         onClick={onUpdate}
                     >
                         <RefreshCw size={15} aria-hidden="true" />
